@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Horn Torus Dynamical Emitter</title>
+  <style>
+    :root {
+      --bg: #080a0c;
+      --panel: rgba(14, 18, 22, 0.86);
+      --border: #1e262e;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --accent: #10b981;
+      --accent-2: #38bdf8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      overflow: hidden;
+    }
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      width: 300px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(10px);
+      padding: 14px;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 10;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+    }
+    .badge { color: var(--accent); font-size: 10px; }
+    .controls, .telemetry { display: flex; flex-direction: column; gap: 6px; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    label { color: var(--muted); flex: 1; }
+    input[type="range"] { width: 120px; accent-color: var(--accent); }
+    .val { width: 42px; text-align: right; color: var(--text); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      border-top: 1px solid var(--border);
+      padding-top: 8px;
+    }
+    .metric { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); padding: 6px; }
+    .metric span { display: block; color: var(--muted); font-size: 10px; }
+    .metric strong { font-size: 13px; color: var(--accent-2); }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding-top: 4px; }
+    button {
+      background: #111820;
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 7px 8px;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.active { border-color: var(--accent); background: rgba(16, 185, 129, 0.14); }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/controls/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <aside id="hud">
+    <div class="header">
+      <span>HORN TORUS ENGINE</span>
+      <span class="badge" id="mode-badge">PYTHON JSON</span>
+    </div>
+
+    <div class="actions">
+      <button id="btn-replay" class="active">Replay JSON</button>
+      <button id="btn-live">Live Sliders</button>
+      <button id="btn-reset" style="grid-column: span 2;">Reset State & Buffer</button>
+    </div>
+
+    <div class="controls" id="slider-panel">
+      <div class="row"><label>A (Action)</label><input id="in-A" type="range" min="0" max="1" step="0.01" value="0.85"><span class="val" id="v-A">0.85</span></div>
+      <div class="row"><label>E (Exposure)</label><input id="in-E" type="range" min="0" max="1" step="0.01" value="0.80"><span class="val" id="v-E">0.80</span></div>
+      <div class="row"><label>G (Guarding)</label><input id="in-G" type="range" min="0" max="1" step="0.01" value="0.15"><span class="val" id="v-G">0.15</span></div>
+      <div class="row"><label>F (Forgive)</label><input id="in-F" type="range" min="0" max="1" step="0.01" value="0.70"><span class="val" id="v-F">0.70</span></div>
+      <div class="row"><label>Δ (Pressure)</label><input id="in-D" type="range" min="0" max="1" step="0.01" value="0.75"><span class="val" id="v-D">0.75</span></div>
+    </div>
+
+    <div class="grid">
+      <div class="metric"><span>APERTURE (P)</span><strong id="m-P">0.000</strong></div>
+      <div class="metric"><span>FLUX (q)</span><strong id="m-q">0.000</strong></div>
+      <div class="metric"><span>OUTPUT (L)</span><strong id="m-L">0.000</strong></div>
+      <div class="metric"><span>VESSEL (V)</span><strong id="m-V">1.000</strong></div>
+      <div class="metric"><span>PHASE (φ)</span><strong id="m-phi">0.0°</strong></div>
+      <div class="metric"><span>RADIUS (r)</span><strong id="m-r">0.000</strong></div>
+    </div>
+  </aside>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/OrbitControls.js";
+
+    // Locked system constants (1:1 parity with love_torus.py)
+    const ALPHA = 0.25, BETA = 0.20, GAMMA = 0.15;
+    const DELTA_C = 0.50, K = 10.0, V_MIN = 0.10, V_CAP = 6.0;
+    const OMEGA = Math.PI / 2.0;
+    const GOLDEN_ANGLE = Math.PI * (3.0 - Math.sqrt(5.0));
+
+    function stepLoveTorus(state, A, E, G, F, Delta, dt = 0.025) {
+      const apertureNow = 1.0 / (1.0 + Math.exp(-K * (Delta - DELTA_C)));
+      const P = Math.max(state.P, apertureNow);
+      const q = A * E * P;
+      const L = state.L + q * dt;
+      const dV = ALPHA * (A * E) - BETA * G + GAMMA * F;
+      const V = Math.min(V_CAP, Math.max(V_MIN, state.V + dV * dt));
+      const phi = (OMEGA * L) % (2.0 * Math.PI);
+      const u = (state.u + GOLDEN_ANGLE) % (2.0 * Math.PI);
+      const r = V * (1.0 - Math.cos(phi));
+      const x = r * Math.cos(u);
+      const y = r * Math.sin(u);
+      const z = V * Math.sin(phi);
+      return { P, q, L, V, phi, u, r, x, y, z };
+    }
+
+    // Scene, camera, renderer
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 200);
+    camera.position.set(5.5, 3.8, 6.5);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // Unit Horn Torus wireframe (R = r = 1, scaled live by V_t)
+    const torusGeo = new THREE.TorusGeometry(1, 1, 24, 64);
+    const torusMat = new THREE.MeshBasicMaterial({
+      color: 0x1e293b,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.35,
+    });
+    const torusMesh = new THREE.Mesh(torusGeo, torusMat);
+    torusMesh.rotation.x = Math.PI / 2; // Align pinch axis vertically along Y
+    scene.add(torusMesh);
+
+    // Pre-allocated GPU ring buffer for particles
+    const MAX_PARTICLES = 4000;
+    const positions = new Float32Array(MAX_PARTICLES * 3);
+    const colors = new Float32Array(MAX_PARTICLES * 3);
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    particleGeo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    particleGeo.setDrawRange(0, 0);
+
+    const particleMat = new THREE.PointsMaterial({
+      size: 0.085,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.92,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    scene.add(new THREE.Points(particleGeo, particleMat));
+
+    // Runtime state
+    let mode = "replay";
+    let pythonFrames = [];
+    let replayCursor = 0;
+    let writeIdx = 0;
+    let activeCount = 0;
+    let state = { P: 0, q: 0, L: 0, V: 1.0, phi: 0, u: 0, r: 0, x: 0, y: 0, z: 0 };
+
+    const cLow = new THREE.Color(0x0f766e);   // Deep sea-moss (low flux / interior)
+    const cMid = new THREE.Color(0x10b981);   // Emerald (active bloom)
+    const cHigh = new THREE.Color(0xe2e8f0);  // Crisp white (peak flux)
+    const tmpColor = new THREE.Color();
+
+    function pushParticle(pt) {
+      const i3 = writeIdx * 3;
+      // Math (x, y, z_up) -> Three.js (x, y_up, z)
+      positions[i3]     = pt.x;
+      positions[i3 + 1] = pt.z;
+      positions[i3 + 2] = pt.y;
+
+      const intensity = Math.min(1, pt.q);
+      tmpColor.copy(intensity < 0.5 ? cLow : cMid).lerp(
+        intensity < 0.5 ? cMid : cHigh,
+        intensity < 0.5 ? intensity * 2 : (intensity - 0.5) * 2
+      );
+      colors[i3]     = tmpColor.r;
+      colors[i3 + 1] = tmpColor.g;
+      colors[i3 + 2] = tmpColor.b;
+
+      writeIdx = (writeIdx + 1) % MAX_PARTICLES;
+      activeCount = Math.min(MAX_PARTICLES, activeCount + 1);
+      particleGeo.setDrawRange(0, activeCount);
+      particleGeo.attributes.position.needsUpdate = true;
+      particleGeo.attributes.color.needsUpdate = true;
+    }
+
+    function updateHUD(pt) {
+      document.getElementById("m-P").textContent = pt.P.toFixed(3);
+      document.getElementById("m-q").textContent = pt.q.toFixed(3);
+      document.getElementById("m-L").textContent = pt.L.toFixed(3);
+      document.getElementById("m-V").textContent = pt.V.toFixed(3);
+      document.getElementById("m-phi").textContent = `${((pt.phi * 180) / Math.PI).toFixed(1)}°`;
+      document.getElementById("m-r").textContent = pt.r.toFixed(3);
+    }
+
+    function resetSimulation() {
+      state = { P: 0, q: 0, L: 0, V: 1.0, phi: 0, u: 0, r: 0, x: 0, y: 0, z: 0 };
+      replayCursor = 0;
+      writeIdx = 0;
+      activeCount = 0;
+      particleGeo.setDrawRange(0, 0);
+      torusMesh.scale.setScalar(1.0);
+      updateHUD(state);
+    }
+
+    // Bind sliders
+    const sliderKeys = ["A", "E", "G", "F", "D"];
+    const inputs = {};
+    for (const key of sliderKeys) {
+      const el = document.getElementById(`in-${key}`);
+      const valEl = document.getElementById(`v-${key}`);
+      inputs[key] = () => parseFloat(el.value);
+      el.addEventListener("input", () => { valEl.textContent = parseFloat(el.value).toFixed(2); });
+    }
+
+    const btnReplay = document.getElementById("btn-replay");
+    const btnLive = document.getElementById("btn-live");
+    const badge = document.getElementById("mode-badge");
+
+    btnReplay.addEventListener("click", () => {
+      mode = "replay";
+      btnReplay.classList.add("active");
+      btnLive.classList.remove("active");
+      badge.textContent = "PYTHON JSON";
+      resetSimulation();
+    });
+
+    btnLive.addEventListener("click", () => {
+      mode = "live";
+      btnLive.classList.add("active");
+      btnReplay.classList.remove("active");
+      badge.textContent = "LIVE ODE";
+      resetSimulation();
+    });
+
+    document.getElementById("btn-reset").addEventListener("click", resetSimulation);
+
+    // Load Python-exported trajectory.json
+    fetch("./trajectory.json")
+      .then((res) => (res.ok ? res.json() : Promise.reject()))
+      .then((data) => { pythonFrames = data.frames || []; })
+      .catch(() => {
+        mode = "live";
+        btnLive.click();
+      });
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (mode === "replay" && pythonFrames.length > 0) {
+        for (let k = 0; k < 4; k++) {
+          if (replayCursor < pythonFrames.length) {
+            state = pythonFrames[replayCursor++];
+            pushParticle(state);
+          }
+        }
+      } else if (mode === "live") {
+        for (let k = 0; k < 3; k++) {
+          state = stepLoveTorus(
+            state,
+            inputs.A(),
+            inputs.E(),
+            inputs.G(),
+            inputs.F(),
+            inputs.D(),
+            0.015
+          );
+          pushParticle(state);
+        }
+      }
+
+      torusMesh.scale.setScalar(state.V);
+      updateHUD(state);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>
